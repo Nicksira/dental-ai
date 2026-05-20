@@ -2,12 +2,25 @@ export async function onRequestPost(context) {
     try {
         // 1. รับข้อมูลรูปภาพ Base64 จากหน้าเว็บ
         const requestData = await context.request.json();
+        
+        // ดัก Error เผื่อไม่มีรูปส่งมา
+        if (!requestData || !requestData.image) {
+             return new Response(JSON.stringify({ status: "error", message: "ไม่พบข้อมูลรูปภาพ" }), {
+                status: 400, headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
         const imageBase64 = requestData.image.split(',')[1]; 
 
-        // 2. ดึง API Key จาก Cloudflare (เราจะไปตั้งค่าในเว็บทีหลัง)
+        // 2. ดึง API Key
         const API_KEY = context.env.GEMINI_API_KEY;
+        if (!API_KEY) {
+            return new Response(JSON.stringify({ status: "error", message: "API Key is missing in Cloudflare settings" }), {
+                status: 500, headers: { 'Content-Type': 'application/json' }
+            });
+        }
 
-        // 3. คำสั่ง Prompt แบบเดียวกับที่ใช้ใน Python
+        // 3. คำสั่ง Prompt
         const prompt = `
         คุณคือทันตแพทย์ผู้เชี่ยวชาญระดับโลก (Expert Dentist AI)
         จงวิเคราะห์ภาพช่องปากที่แนบมานี้อย่างละเอียด และตอบกลับมาเป็นรูปแบบ JSON เท่านั้น โดยมีโครงสร้างดังนี้:
@@ -23,7 +36,7 @@ export async function onRequestPost(context) {
         }
         `;
 
-        // 4. ส่งข้อมูลไปให้ Google Gemini 1.5 Flash ผ่าน REST API
+        // 4. ยิง API
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -39,17 +52,32 @@ export async function onRequestPost(context) {
 
         const data = await response.json();
         
-        // 5. นำคำตอบที่ได้มาจัดการให้เป็น JSON ที่สมบูรณ์
+        // ดัก Error กรณี Google API มีปัญหา (เช่น คีย์ผิด หรือเน็ตเวิร์คพัง)
+        if (!response.ok) {
+            return new Response(JSON.stringify({ status: "error", message: `Google API Error: ${data.error?.message || 'Unknown Error'}` }), {
+                status: response.status, headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        // ดัก Error กรณี AI ไม่ตอบกลับ หรือโดนบล็อกเนื้อหา
+        if (!data.candidates || data.candidates.length === 0) {
+             return new Response(JSON.stringify({ status: "error", message: "Gemini did not return any candidates. The image might be blocked by safety filters." }), {
+                status: 500, headers: { 'Content-Type': 'application/json' }
+            });
+        }
+
+        // 5. นำคำตอบที่ได้มาจัดการให้เป็น JSON
         let aiResponseText = data.candidates[0].content.parts[0].text;
         aiResponseText = aiResponseText.replace(/```json\n?/, '').replace(/\n?```/, '').trim();
         const resultJson = JSON.parse(aiResponseText);
 
-        // 6. ส่งผลลัพธ์กลับไปให้หน้าเว็บแสดงผล
+        // 6. ส่งมอบผลลัพธ์
         return new Response(JSON.stringify({ status: "success", data: resultJson }), {
             headers: { 'Content-Type': 'application/json' }
         });
 
     } catch (error) {
+        // จับ Error อื่นๆ ทั้งหมดที่ระบบคาดไม่ถึง
         return new Response(JSON.stringify({ status: "error", message: error.toString() }), {
             status: 500,
             headers: { 'Content-Type': 'application/json' }
